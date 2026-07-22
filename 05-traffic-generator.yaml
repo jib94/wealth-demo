@@ -31,7 +31,7 @@ spec:
           env:
             # Raise VUS for more load (and a higher error rate in problem mode).
             - name: VUS
-              value: "6"
+              value: "16"
             - name: THINK_MIN_MS
               value: "300"
             - name: THINK_MAX_MS
