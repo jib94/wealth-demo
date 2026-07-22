@@ -20,7 +20,7 @@ metadata:
   namespace: wealth-demo
 data:
   # "off" = healthy platform.  "on" = starve the positions database pool.
-  problem-mode: "on"
+  problem-mode: "off"
 
   # Only used when problem-mode is "on".
   # These two values ARE the root cause - and raising db-pool-size is the fix.
