@@ -24,5 +24,5 @@ data:
 
   # Only used when problem-mode is "on".
   # These two values ARE the root cause - and raising db-pool-size is the fix.
-  db-pool-size: "2"     # connections available to the positions database
+  db-pool-size: "1"     # Was 2, connections available to the positions database
   db-query-ms: "900"    # how long each query holds a connection
