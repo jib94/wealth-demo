@@ -1,0 +1,167 @@
+# Generated for the Dynatrace wealth-management demo.
+---
+# portfolio-service - values a portfolio. Reads positions-store, then prices
+# the holdings via pricing-service. Impacted when the datastore degrades.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: portfolio-service
+  namespace: wealth-demo
+  labels:
+    app: portfolio-service
+    app.kubernetes.io/name: portfolio-service
+    app.kubernetes.io/part-of: wealth-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: portfolio-service
+  template:
+    metadata:
+      labels:
+        app: portfolio-service
+        app.kubernetes.io/name: portfolio-service
+        app.kubernetes.io/part-of: wealth-platform
+      annotations:
+        metadata.dynatrace.com/release.product: "wealth-platform"
+        metadata.dynatrace.com/release.stage: "lab"
+    spec:
+      containers:
+        - name: portfolio-service
+          image: node:20-slim
+          command: ["node", "/app/portfolio-service.js"]
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: DT_RELEASE_PRODUCT
+              value: "wealth-platform"
+            - name: DT_RELEASE_VERSION
+              value: "1.0.0"
+            - name: DT_TAGS
+              value: "application=wealth-platform team=wealth-engineering environment=lab"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+          volumeMounts:
+            - name: app-code
+              mountPath: /app
+              readOnly: true
+      volumes:
+        - name: app-code
+          configMap:
+            name: wealth-app-code
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: portfolio-service
+  namespace: wealth-demo
+  labels:
+    app: portfolio-service
+spec:
+  selector:
+    app: portfolio-service
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+# client-profile-service - advisor-facing client record. ALSO reads
+# positions-store, which is what makes the failure fan out.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: client-profile-service
+  namespace: wealth-demo
+  labels:
+    app: client-profile-service
+    app.kubernetes.io/name: client-profile-service
+    app.kubernetes.io/part-of: wealth-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: client-profile-service
+  template:
+    metadata:
+      labels:
+        app: client-profile-service
+        app.kubernetes.io/name: client-profile-service
+        app.kubernetes.io/part-of: wealth-platform
+      annotations:
+        metadata.dynatrace.com/release.product: "wealth-platform"
+        metadata.dynatrace.com/release.stage: "lab"
+    spec:
+      containers:
+        - name: client-profile-service
+          image: node:20-slim
+          command: ["node", "/app/client-profile-service.js"]
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: DT_RELEASE_PRODUCT
+              value: "wealth-platform"
+            - name: DT_RELEASE_VERSION
+              value: "1.0.0"
+            - name: DT_TAGS
+              value: "application=wealth-platform team=wealth-engineering environment=lab"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+          volumeMounts:
+            - name: app-code
+              mountPath: /app
+              readOnly: true
+      volumes:
+        - name: app-code
+          configMap:
+            name: wealth-app-code
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: client-profile-service
+  namespace: wealth-demo
+  labels:
+    app: client-profile-service
+spec:
+  selector:
+    app: client-profile-service
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

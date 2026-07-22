@@ -1,0 +1,53 @@
+# Generated for the Dynatrace wealth-management demo.
+---
+# traffic-generator - simulates clients and advisors using the platform so the
+# services always have realistic load and Dynatrace has healthy baselines.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traffic-generator
+  namespace: wealth-demo
+  labels:
+    app: traffic-generator
+    app.kubernetes.io/part-of: wealth-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: traffic-generator
+  template:
+    metadata:
+      labels:
+        app: traffic-generator
+        app.kubernetes.io/part-of: wealth-platform
+      annotations:
+        metadata.dynatrace.com/release.product: "wealth-platform"
+        metadata.dynatrace.com/release.stage: "lab"
+    spec:
+      containers:
+        - name: traffic-generator
+          image: node:20-slim
+          command: ["node", "/app/traffic-generator.js"]
+          env:
+            # Raise VUS for more load (and a higher error rate in problem mode).
+            - name: VUS
+              value: "6"
+            - name: THINK_MIN_MS
+              value: "300"
+            - name: THINK_MAX_MS
+              value: "900"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+          volumeMounts:
+            - name: app-code
+              mountPath: /app
+              readOnly: true
+      volumes:
+        - name: app-code
+          configMap:
+            name: wealth-app-code

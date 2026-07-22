@@ -1,0 +1,453 @@
+# Generated for the Dynatrace wealth-management demo.
+---
+# The application source, mounted into each pod at /app.
+# No container build and no registry required - the services run on the
+# stock node:20-slim image using only the Node standard library.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wealth-app-code
+  namespace: wealth-demo
+data:
+  lib.js: |
+    // Shared helpers for the wealth-management demo services.
+    // Plain Node.js standard library only - no npm install, no image build.
+    const http = require('http');
+    const fs = require('fs');
+
+    // Reads the problem-mode toggle from the mounted ConfigMap on EVERY call,
+    // so flipping it in Git takes effect without restarting any pod.
+    const PORT = parseInt(process.env.PORT || '8080', 10);
+    // Optional host->port map, used only for local testing outside Kubernetes.
+    let SVC_PORTS = {};
+    try { SVC_PORTS = JSON.parse(process.env.SVC_PORTS || '{}'); } catch (e) { SVC_PORTS = {}; }
+
+    const CONFIG_DIR = process.env.CONFIG_DIR || '/config';
+
+    // Read any key from the mounted ConfigMap, fresh on every call, so changes
+    // committed to Git take effect without restarting a pod.
+    function readSetting(key, fallback) {
+      try {
+        return fs.readFileSync(CONFIG_DIR + '/' + key, 'utf8').trim();
+      } catch (e) {
+        return fallback;
+      }
+    }
+
+    function readMode() {
+      return readSetting('problem-mode', 'off').toLowerCase();
+    }
+
+    function readNumber(key, fallback) {
+      const n = parseInt(readSetting(key, ''), 10);
+      return Number.isFinite(n) && n > 0 ? n : fallback;
+    }
+
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+    // Call another service. Rejects on 5xx so failures propagate up the chain.
+    function call(host, path) {
+      return new Promise((resolve, reject) => {
+        const req = http.request(
+          { host: host, port: SVC_PORTS[host] || 8080, path: path, method: 'GET', timeout: 6000 },
+          (res) => {
+            let body = '';
+            res.on('data', (c) => { body += c; });
+            res.on('end', () => {
+              if (res.statusCode >= 500) {
+                const err = new Error(host + path + ' returned ' + res.statusCode);
+                err.status = 502;
+                return reject(err);
+              }
+              try { resolve(JSON.parse(body)); } catch (e) { resolve({ raw: body }); }
+            });
+          }
+        );
+        req.on('timeout', () => { req.destroy(new Error(host + path + ' timed out')); });
+        req.on('error', reject);
+        req.end();
+      });
+    }
+
+    // Minimal router. Route keys ending in '*' match by prefix.
+    function serve(name, routes) {
+      const server = http.createServer(async (req, res) => {
+        const url = new URL(req.url, 'http://localhost');
+        const path = url.pathname;
+
+        if (path === '/health') {
+          res.writeHead(200, { 'Content-Type': 'text/plain' });
+          return res.end('ok');
+        }
+
+        const key = Object.keys(routes).find((r) =>
+          r.endsWith('*') ? path.startsWith(r.slice(0, -1)) : path === r
+        );
+
+        if (!key) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'not found' }));
+        }
+
+        const started = Date.now();
+        try {
+          const out = await routes[key](url, req);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(out));
+        } catch (err) {
+          const status = err.status || 502;
+          console.error(
+            '[' + name + '] ERROR ' + path + ' (' + (Date.now() - started) + 'ms) status=' +
+            status + ' :: ' + err.message
+          );
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message, service: name }));
+        }
+      });
+
+      server.keepAliveTimeout = 8000;
+      server.listen(PORT, () => console.log('[' + name + '] listening on :' + PORT));
+    }
+
+    module.exports = { call: call, serve: serve, readMode: readMode, readNumber: readNumber, sleep: sleep };
+  positions-store.js: |
+    // positions-store
+    // The shared system-of-record for client holdings. Both portfolio-service and
+    // client-profile-service depend on it, which is what makes it an interesting
+    // root cause: one degraded service, several impacted applications.
+    //
+    // It models a database connection pool. In problem mode the pool is far too
+    // small for the incoming load, so requests queue and then time out waiting for
+    // a connection - the classic "connection pool exhausted" failure.
+    const { serve, readMode, readNumber, sleep } = require('./lib');
+
+    // Healthy defaults. Under problem mode the pool size and query time are read
+    // from the ConfigMap, so the severity - and the fix - live in YAML.
+    const NORMAL = { poolSize: 10, queryMs: 25 };
+
+    let inUse = 0;
+    const waiting = [];
+
+    function currentConfig() {
+      if (readMode() !== 'on') return NORMAL;
+      return {
+        poolSize: readNumber('db-pool-size', 2),
+        queryMs: readNumber('db-query-ms', 900),
+      };
+    }
+
+    function acquire(poolSize, timeoutMs) {
+      return new Promise((resolve, reject) => {
+        if (inUse < poolSize) {
+          inUse++;
+          return resolve();
+        }
+        const waiter = { resolve: resolve, reject: reject, timer: null };
+        waiter.timer = setTimeout(() => {
+          const i = waiting.indexOf(waiter);
+          if (i >= 0) waiting.splice(i, 1);
+          const err = new Error(
+            'connection pool exhausted: could not acquire a connection to the positions ' +
+            'database within ' + timeoutMs + 'ms (pool size ' + poolSize + ', ' +
+            waiting.length + ' requests queued)'
+          );
+          err.status = 503;
+          reject(err);
+        }, timeoutMs);
+        waiting.push(waiter);
+      });
+    }
+
+    function release() {
+      const next = waiting.shift();
+      if (next) {
+        clearTimeout(next.timer);
+        next.resolve(); // hand the connection straight to the next waiter
+      } else {
+        inUse--;
+      }
+    }
+
+    const HOLDINGS = [
+      { symbol: 'VTI', shares: 420, costBasis: 182.4 },
+      { symbol: 'AGG', shares: 310, costBasis: 98.15 },
+      { symbol: 'MSFT', shares: 85, costBasis: 305.2 },
+      { symbol: 'BRK.B', shares: 40, costBasis: 355.7 },
+      { symbol: 'VXUS', shares: 260, costBasis: 57.9 },
+    ];
+
+    serve('positions-store', {
+      '/positions/*': async (url) => {
+        const cfg = currentConfig();
+        const accountId = url.pathname.split('/').pop() || 'unknown';
+
+        await acquire(cfg.poolSize, 1500);
+        try {
+          await sleep(cfg.queryMs + Math.random() * 30);
+          return {
+            accountId: accountId,
+            holdings: HOLDINGS,
+            pool: { size: cfg.poolSize, inUse: inUse, queued: waiting.length },
+          };
+        } finally {
+          release();
+        }
+      },
+    });
+
+    setInterval(() => {
+      const cfg = currentConfig();
+      console.log(
+        '[positions-store] mode=' + readMode() + ' poolSize=' + cfg.poolSize +
+        ' inUse=' + inUse + ' queued=' + waiting.length
+      );
+    }, 30000);
+  pricing-service.js: |
+    // pricing-service
+    // Market data / quote lookup. Healthy in both modes - it is deliberately NOT
+    // the root cause, so Davis has to distinguish it from the real culprit.
+    const { serve, sleep } = require('./lib');
+
+    const BASE = { VTI: 291.4, AGG: 96.8, MSFT: 431.6, 'BRK.B': 462.1, VXUS: 64.3 };
+
+    function quote(symbol) {
+      const base = BASE[symbol] || 100;
+      return Math.round((base * (0.995 + Math.random() * 0.01)) * 100) / 100;
+    }
+
+    serve('pricing-service', {
+      '/prices': async (url) => {
+        await sleep(12 + Math.random() * 18);
+        const symbols = (url.searchParams.get('symbols') || 'VTI').split(',');
+        const prices = {};
+        symbols.forEach((s) => { prices[s] = quote(s); });
+        return { asOf: new Date().toISOString(), prices: prices };
+      },
+      '/market-summary': async () => {
+        await sleep(10 + Math.random() * 15);
+        return {
+          indices: { SP500: 5321.4, NASDAQ: 17114.2, DOW: 39215.8 },
+          asOf: new Date().toISOString(),
+        };
+      },
+    });
+  portfolio-service.js: |
+    // portfolio-service
+    // Values a client portfolio: reads holdings from positions-store, then prices
+    // them via pricing-service. Impacted whenever positions-store degrades.
+    const { serve, call } = require('./lib');
+
+    serve('portfolio-service', {
+      '/portfolio/*': async (url) => {
+        const accountId = url.pathname.split('/').pop();
+
+        const positions = await call('positions-store', '/positions/' + accountId);
+        const symbols = positions.holdings.map((h) => h.symbol).join(',');
+        const pricing = await call('pricing-service', '/prices?symbols=' + encodeURIComponent(symbols));
+
+        let marketValue = 0;
+        let costBasis = 0;
+        const lines = positions.holdings.map((h) => {
+          const price = pricing.prices[h.symbol] || 0;
+          const value = Math.round(h.shares * price * 100) / 100;
+          marketValue += value;
+          costBasis += h.shares * h.costBasis;
+          return { symbol: h.symbol, shares: h.shares, price: price, marketValue: value };
+        });
+
+        return {
+          accountId: accountId,
+          lines: lines,
+          marketValue: Math.round(marketValue * 100) / 100,
+          unrealizedGain: Math.round((marketValue - costBasis) * 100) / 100,
+        };
+      },
+
+      '/projection/*': async (url) => {
+        const accountId = url.pathname.split('/').pop();
+        const positions = await call('positions-store', '/positions/' + accountId);
+        const years = 20;
+        return {
+          accountId: accountId,
+          holdings: positions.holdings.length,
+          horizonYears: years,
+          projectedValue: Math.round(250000 * Math.pow(1.06, years)),
+        };
+      },
+    });
+  client-profile-service.js: |
+    // client-profile-service
+    // Advisor-facing client record. Also reads positions-store, which is what makes
+    // the failure fan out across two different application paths.
+    const { serve, call } = require('./lib');
+
+    const CLIENTS = {
+      'C-1001': { name: 'Whitfield Family Trust', tier: 'Private Client', advisor: 'A-22' },
+      'C-1002': { name: 'Nakamura Retirement', tier: 'Wealth Builder', advisor: 'A-14' },
+      'C-1003': { name: 'Delgado Holdings LLC', tier: 'Private Client', advisor: 'A-22' },
+      'C-1004': { name: 'Osei Education Fund', tier: 'Core', advisor: 'A-07' },
+    };
+
+    serve('client-profile-service', {
+      '/client/*': async (url) => {
+        const clientId = url.pathname.split('/').pop();
+        const profile = CLIENTS[clientId] || { name: 'Unknown Client', tier: 'Core', advisor: 'A-00' };
+
+        // Every profile view also loads the client's holdings summary.
+        const positions = await call('positions-store', '/positions/' + clientId);
+
+        return {
+          clientId: clientId,
+          name: profile.name,
+          tier: profile.tier,
+          advisor: profile.advisor,
+          holdingsCount: positions.holdings.length,
+        };
+      },
+    });
+  web-portal.js: |
+    // web-portal
+    // The client-facing portal (BFF). This is the entry point most "users" hit,
+    // so when the shared datastore degrades, this is where clients feel it.
+    const { serve, call, sleep } = require('./lib');
+
+    serve('web-portal', {
+      '/login': async () => {
+        await sleep(20 + Math.random() * 25);
+        return { session: 'sess-' + Math.random().toString(36).slice(2, 10), status: 'ok' };
+      },
+
+      '/dashboard/*': async (url) => {
+        const accountId = url.pathname.split('/').pop();
+        const portfolio = await call('portfolio-service', '/portfolio/' + accountId);
+        const market = await call('pricing-service', '/market-summary');
+        return {
+          accountId: accountId,
+          marketValue: portfolio.marketValue,
+          unrealizedGain: portfolio.unrealizedGain,
+          indices: market.indices,
+        };
+      },
+
+      '/holdings/*': async (url) => {
+        const accountId = url.pathname.split('/').pop();
+        const portfolio = await call('portfolio-service', '/portfolio/' + accountId);
+        return { accountId: accountId, lines: portfolio.lines };
+      },
+
+      '/retirement-projection/*': async (url) => {
+        const accountId = url.pathname.split('/').pop();
+        return await call('portfolio-service', '/projection/' + accountId);
+      },
+    });
+  advisor-api.js: |
+    // advisor-api
+    // The advisor workstation API. A second, independent application path that
+    // also depends on the same shared datastore.
+    const { serve, call, sleep } = require('./lib');
+
+    const BOOK = ['C-1001', 'C-1002', 'C-1003', 'C-1004'];
+
+    serve('advisor-api', {
+      '/clients': async () => {
+        await sleep(15 + Math.random() * 20);
+        return { advisor: 'A-22', clients: BOOK };
+      },
+
+      '/client-review/*': async (url) => {
+        const clientId = url.pathname.split('/').pop();
+        const profile = await call('client-profile-service', '/client/' + clientId);
+        const portfolio = await call('portfolio-service', '/portfolio/' + clientId);
+        return {
+          clientId: clientId,
+          name: profile.name,
+          tier: profile.tier,
+          marketValue: portfolio.marketValue,
+          unrealizedGain: portfolio.unrealizedGain,
+        };
+      },
+    });
+  traffic-generator.js: |
+    // traffic-generator
+    // Simulates advisors and clients using the platform: logging in, opening
+    // dashboards, reviewing holdings, running projections, and advisors doing
+    // client reviews. Keeps a steady, realistic load so Dynatrace has baselines.
+    const http = require('http');
+
+    const VUS = parseInt(process.env.VUS || '4', 10);
+    const THINK_MIN = parseInt(process.env.THINK_MIN_MS || '300', 10);
+    const THINK_MAX = parseInt(process.env.THINK_MAX_MS || '900', 10);
+
+    let SVC_PORTS = {};
+    try { SVC_PORTS = JSON.parse(process.env.SVC_PORTS || '{}'); } catch (e) { SVC_PORTS = {}; }
+
+    const ACCOUNTS = ['C-1001', 'C-1002', 'C-1003', 'C-1004'];
+    const pick = (a) => a[Math.floor(Math.random() * a.length)];
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+    let ok = 0;
+    let failed = 0;
+
+    function hit(host, path) {
+      return new Promise((resolve) => {
+        const req = http.request(
+          { host: host, port: SVC_PORTS[host] || 8080, path: path, method: 'GET', timeout: 8000 },
+          (res) => {
+            res.resume();
+            res.on('end', () => {
+              if (res.statusCode >= 500) failed++; else ok++;
+              resolve();
+            });
+          }
+        );
+        req.on('timeout', () => { req.destroy(); });
+        req.on('error', () => { failed++; resolve(); });
+        req.end();
+      });
+    }
+
+    // A realistic client session through the portal.
+    async function clientJourney() {
+      const acct = pick(ACCOUNTS);
+      await hit('web-portal', '/login');
+      await sleep(120);
+      await hit('web-portal', '/dashboard/' + acct);
+      await sleep(200);
+      await hit('web-portal', '/holdings/' + acct);
+      if (Math.random() < 0.35) {
+        await sleep(150);
+        await hit('web-portal', '/retirement-projection/' + acct);
+      }
+    }
+
+    // An advisor working through their book of business.
+    async function advisorJourney() {
+      await hit('advisor-api', '/clients');
+      await sleep(150);
+      await hit('advisor-api', '/client-review/' + pick(ACCOUNTS));
+    }
+
+    async function virtualUser(id) {
+      // stagger startup so all users don't fire in lockstep
+      await sleep(Math.random() * 2000);
+      for (;;) {
+        try {
+          if (Math.random() < 0.65) await clientJourney();
+          else await advisorJourney();
+        } catch (e) {
+          // never let a virtual user die
+        }
+        await sleep(THINK_MIN + Math.random() * (THINK_MAX - THINK_MIN));
+      }
+    }
+
+    console.log('[traffic-generator] starting ' + VUS + ' virtual users');
+    for (let i = 0; i < VUS; i++) virtualUser(i);
+
+    setInterval(() => {
+      const total = ok + failed;
+      const rate = total ? ((failed / total) * 100).toFixed(1) : '0.0';
+      console.log('[traffic-generator] requests=' + total + ' ok=' + ok + ' failed=' + failed + ' failRate=' + rate + '%');
+      ok = 0;
+      failed = 0;
+    }, 30000);

@@ -1,0 +1,28 @@
+# Generated for the Dynatrace wealth-management demo.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: wealth-demo
+  labels:
+    app.kubernetes.io/part-of: wealth-platform
+---
+# =====================================================================
+#  THE DEMO CONTROL PANEL
+#  Flip problem-mode to "on", commit, and Argo CD rolls it out.
+#  No pod restart needed - the services re-read these values per request
+#  (allow ~1-2 minutes for Kubernetes to refresh the mounted files).
+# =====================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wealth-demo-config
+  namespace: wealth-demo
+data:
+  # "off" = healthy platform.  "on" = starve the positions database pool.
+  problem-mode: "off"
+
+  # Only used when problem-mode is "on".
+  # These two values ARE the root cause - and raising db-pool-size is the fix.
+  db-pool-size: "2"     # connections available to the positions database
+  db-query-ms: "900"    # how long each query holds a connection

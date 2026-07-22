@@ -1,0 +1,174 @@
+# Generated for the Dynatrace wealth-management demo.
+---
+# positions-store - the shared system of record for client holdings.
+# THIS is the service that degrades in problem mode. Two different
+# applications depend on it, so one failure impacts several entities.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: positions-store
+  namespace: wealth-demo
+  labels:
+    app: positions-store
+    app.kubernetes.io/name: positions-store
+    app.kubernetes.io/part-of: wealth-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: positions-store
+  template:
+    metadata:
+      labels:
+        app: positions-store
+        app.kubernetes.io/name: positions-store
+        app.kubernetes.io/part-of: wealth-platform
+      annotations:
+        metadata.dynatrace.com/release.product: "wealth-platform"
+        metadata.dynatrace.com/release.stage: "lab"
+    spec:
+      containers:
+        - name: positions-store
+          image: node:20-slim
+          command: ["node", "/app/positions-store.js"]
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: DT_RELEASE_PRODUCT
+              value: "wealth-platform"
+            - name: DT_RELEASE_VERSION
+              value: "1.0.0"
+            - name: DT_TAGS
+              value: "application=wealth-platform team=wealth-engineering environment=lab"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+          volumeMounts:
+            - name: app-code
+              mountPath: /app
+              readOnly: true
+            - name: demo-config
+              mountPath: /config
+              readOnly: true
+      volumes:
+        - name: app-code
+          configMap:
+            name: wealth-app-code
+        - name: demo-config
+          configMap:
+            name: wealth-demo-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: positions-store
+  namespace: wealth-demo
+  labels:
+    app: positions-store
+spec:
+  selector:
+    app: positions-store
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+# pricing-service - market data and quotes. Stays healthy on purpose, so
+# Davis has to distinguish it from the true root cause.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pricing-service
+  namespace: wealth-demo
+  labels:
+    app: pricing-service
+    app.kubernetes.io/name: pricing-service
+    app.kubernetes.io/part-of: wealth-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pricing-service
+  template:
+    metadata:
+      labels:
+        app: pricing-service
+        app.kubernetes.io/name: pricing-service
+        app.kubernetes.io/part-of: wealth-platform
+      annotations:
+        metadata.dynatrace.com/release.product: "wealth-platform"
+        metadata.dynatrace.com/release.stage: "lab"
+    spec:
+      containers:
+        - name: pricing-service
+          image: node:20-slim
+          command: ["node", "/app/pricing-service.js"]
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: DT_RELEASE_PRODUCT
+              value: "wealth-platform"
+            - name: DT_RELEASE_VERSION
+              value: "1.0.0"
+            - name: DT_TAGS
+              value: "application=wealth-platform team=wealth-engineering environment=lab"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+          volumeMounts:
+            - name: app-code
+              mountPath: /app
+              readOnly: true
+      volumes:
+        - name: app-code
+          configMap:
+            name: wealth-app-code
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pricing-service
+  namespace: wealth-demo
+  labels:
+    app: pricing-service
+spec:
+  selector:
+    app: pricing-service
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

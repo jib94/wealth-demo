@@ -1,0 +1,166 @@
+# Generated for the Dynatrace wealth-management demo.
+---
+# web-portal - the client-facing portal. Entry point for client journeys.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-portal
+  namespace: wealth-demo
+  labels:
+    app: web-portal
+    app.kubernetes.io/name: web-portal
+    app.kubernetes.io/part-of: wealth-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: web-portal
+  template:
+    metadata:
+      labels:
+        app: web-portal
+        app.kubernetes.io/name: web-portal
+        app.kubernetes.io/part-of: wealth-platform
+      annotations:
+        metadata.dynatrace.com/release.product: "wealth-platform"
+        metadata.dynatrace.com/release.stage: "lab"
+    spec:
+      containers:
+        - name: web-portal
+          image: node:20-slim
+          command: ["node", "/app/web-portal.js"]
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: DT_RELEASE_PRODUCT
+              value: "wealth-platform"
+            - name: DT_RELEASE_VERSION
+              value: "1.0.0"
+            - name: DT_TAGS
+              value: "application=wealth-platform team=wealth-engineering environment=lab"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+          volumeMounts:
+            - name: app-code
+              mountPath: /app
+              readOnly: true
+      volumes:
+        - name: app-code
+          configMap:
+            name: wealth-app-code
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-portal
+  namespace: wealth-demo
+  labels:
+    app: web-portal
+spec:
+  selector:
+    app: web-portal
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+# advisor-api - the advisor workstation API. A second, independent
+# application path onto the same shared datastore.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: advisor-api
+  namespace: wealth-demo
+  labels:
+    app: advisor-api
+    app.kubernetes.io/name: advisor-api
+    app.kubernetes.io/part-of: wealth-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: advisor-api
+  template:
+    metadata:
+      labels:
+        app: advisor-api
+        app.kubernetes.io/name: advisor-api
+        app.kubernetes.io/part-of: wealth-platform
+      annotations:
+        metadata.dynatrace.com/release.product: "wealth-platform"
+        metadata.dynatrace.com/release.stage: "lab"
+    spec:
+      containers:
+        - name: advisor-api
+          image: node:20-slim
+          command: ["node", "/app/advisor-api.js"]
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: DT_RELEASE_PRODUCT
+              value: "wealth-platform"
+            - name: DT_RELEASE_VERSION
+              value: "1.0.0"
+            - name: DT_TAGS
+              value: "application=wealth-platform team=wealth-engineering environment=lab"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+          volumeMounts:
+            - name: app-code
+              mountPath: /app
+              readOnly: true
+      volumes:
+        - name: app-code
+          configMap:
+            name: wealth-app-code
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: advisor-api
+  namespace: wealth-demo
+  labels:
+    app: advisor-api
+spec:
+  selector:
+    app: advisor-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
